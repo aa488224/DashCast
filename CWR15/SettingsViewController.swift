@@ -65,6 +65,9 @@ final class SettingsViewController: UIViewController, UITableViewDataSource, UIT
                     Log.shared.info("[设置] 自动连接：\(value ? "开" : "关")")
                 }),
                 Row(title: "主手机地址", detail: Settings.host.isEmpty ? "未设置" : "\(Settings.host):\(Settings.port)"),
+                Row(title: "接收方式", detail: Settings.transport.title, accessory: .disclosureIndicator, action: { [weak self] in
+                    self?.chooseTransport()
+                }),
                 Row(title: "让主端按此尺寸出图", detail: nil, switchValue: Settings.reportsDisplaySize, onToggle: { value in
                     Settings.reportsDisplaySize = value
                     Log.shared.info("[设置] 上报出图尺寸：\(value ? "开" : "关")，重新连接生效")
@@ -109,6 +112,24 @@ final class SettingsViewController: UIViewController, UITableViewDataSource, UIT
     // MARK: 动作
 
     @objc private func close() { dismiss(animated: true) }
+
+    private func chooseTransport() {
+        let sheet = UIAlertController(title: "接收方式", message: "WebSocket 能回传触控；HTTP 原始流绕开 WebSocket 升级，只能看画面。改动后重新连接生效。", preferredStyle: .actionSheet)
+        for option in [Settings.Transport.webSocket, .raw] {
+            let mark = option == Settings.transport ? "✓ " : ""
+            sheet.addAction(UIAlertAction(title: "\(mark)\(option.title)", style: .default) { [weak self] _ in
+                Settings.transport = option
+                Log.shared.info("[设置] 接收方式：\(option.title)（\(option.detail)）")
+                self?.rebuild()
+            })
+        }
+        sheet.addAction(UIAlertAction(title: "取消", style: .cancel))
+        if let popover = sheet.popoverPresentationController {
+            popover.sourceView = table
+            popover.sourceRect = CGRect(x: table.bounds.midX, y: table.bounds.midY, width: 1, height: 1)
+        }
+        present(sheet, animated: true)
+    }
 
     private func chooseResolution() {
         let sheet = UIAlertController(title: "出图尺寸", message: "只在打开「让主端按此尺寸出图」后生效。改动会让主手机按新尺寸重启 CarPlay 会话，接收端会短暂断流。", preferredStyle: .actionSheet)
