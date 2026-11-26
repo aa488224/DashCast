@@ -1,13 +1,11 @@
 name: Build DashCast IPA
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
@@ -16,7 +14,7 @@ jobs:
 
       - name: 编译（未签名）
         run: |
-          set -e
+          set -o pipefail
           xcodebuild \
             -project CWR15.xcodeproj \
             -target DashCast \
@@ -26,8 +24,14 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
+            IPHONEOS_DEPLOYMENT_TARGET=15.0 \
             SYMROOT="$PWD/build" \
-            build
+            build > build.log 2>&1 || true
+          echo "=== tail ==="
+          tail -5 build.log
+          echo "=== errors ==="
+          grep -E "error:" build.log | sed 's|.*/CWR15/||' | sort -u | head -60 || true
+          grep -q "BUILD SUCCEEDED" build.log || exit 1
 
       - name: 打包 IPA
         run: |
