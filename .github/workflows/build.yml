@@ -47,3 +47,11 @@ jobs:
           name: DashCast-unsigned-ipa
           path: DashCast-unsigned.ipa
           if-no-files-found: error
+
+      - name: 上传编译日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
