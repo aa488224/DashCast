@@ -52,6 +52,16 @@ final class StreamClient {
     private var lastFormat: VideoFormatInfo?
     private var keyframeRequests = 0
 
+    // HTTP 原始流（Annex-B）
+    private var rawSession: URLSession?
+    private var rawTask: URLSessionDataTask?
+    private var rawDelegate: RawDelegate?
+    private var rawBytes: [UInt8] = []
+    private var rawSPS: Data?
+    private var rawPPS: Data?
+    private var rawFormatSent = false
+    private var rawTouchNoticed = false
+
     // MARK: 生命周期
 
     func start(host: String, port: Int) {
@@ -66,6 +76,11 @@ final class StreamClient {
         receivedBytes = 0
         lastStats = Date()
         setState(.connecting, detail: "正在连接 \(url.host ?? host):\(url.port ?? port)")
+
+        if Settings.transport == .raw {
+            startRaw(host: host, port: port)
+            return
+        }
 
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 12
@@ -100,6 +115,15 @@ final class StreamClient {
             self.task = nil
             self.session?.invalidateAndCancel()
             self.session = nil
+            self.rawTask?.cancel()
+            self.rawTask = nil
+            self.rawSession?.invalidateAndCancel()
+            self.rawSession = nil
+            self.rawDelegate = nil
+            self.rawBytes.removeAll()
+            self.rawSPS = nil
+            self.rawPPS = nil
+            self.rawFormatSent = false
             self.lastFormat = nil
             if notify {
                 self.setState(.idle, detail: "已断开")
@@ -111,7 +135,7 @@ final class StreamClient {
 
     func requestKeyframe() {
         queue.async { [weak self] in
-            guard let self else { return }
+            guard let self, Settings.transport == .webSocket else { return }
             self.keyframeRequests += 1
             self.sendJSON(["type": "keyframe", "reason": "解码器需要关键帧"])
             if self.keyframeRequests <= 3 || self.keyframeRequests % 10 == 0 {
@@ -291,6 +315,13 @@ final class StreamClient {
         let list = points.map { ["id": $0.id, "x": $0.x, "y": $0.y] as [String: Any] }
         queue.async { [weak self] in
             guard let self, !self.stopped else { return }
+            guard Settings.transport == .webSocket else {
+                if !self.rawTouchNoticed {
+                    self.rawTouchNoticed = true
+                    self.log("原始流是单向的，触控回传不可用；需要触控请改回 WebSocket")
+                }
+                return
+            }
             self.sendJSON(["type": "touches", "points": list])
         }
     }
@@ -335,6 +366,9 @@ final class StreamClient {
         heartbeat?.cancel(); heartbeat = nil
         task?.cancel(with: .goingAway, reason: nil); task = nil
         session?.invalidateAndCancel(); session = nil
+        rawTask?.cancel(); rawTask = nil
+        rawSession?.invalidateAndCancel(); rawSession = nil
+        rawDelegate = nil
         setState(.failed(reason), detail: reason)
     }
 
@@ -352,6 +386,147 @@ final class StreamClient {
     }
 
     // MARK: 地址
+
+    // MARK: HTTP 原始流（Annex-B）
+
+    private final class RawDelegate: NSObject, URLSessionDataDelegate {
+        var onData: ((Data) -> Void)?
+        var onEnd: ((String) -> Void)?
+
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+            onData?(data)
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+            if let error { onEnd?("原始流中断：\(error.localizedDescription)") }
+            else { onEnd?("主手机结束了原始流") }
+        }
+    }
+
+    private func startRaw(host: String, port: Int) {
+        rawBytes.removeAll()
+        rawSPS = nil
+        rawPPS = nil
+        rawFormatSent = false
+        guard let url = URL(string: "http://\(host):\(port)/video.h264") else {
+            fail("地址无效"); return
+        }
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 60 * 60 * 12
+        config.httpAdditionalHeaders = ["User-Agent": "DashCast/1.0"]
+        let delegate = RawDelegate()
+        delegate.onData = { [weak self] data in self?.queue.async { self?.consumeRaw(data) } }
+        delegate.onEnd = { [weak self] reason in
+            self?.queue.async {
+                guard let self, !self.stopped else { return }
+                self.fail(reason)
+            }
+        }
+        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+        let task = session.dataTask(with: url)
+        rawDelegate = delegate
+        rawSession = session
+        rawTask = task
+        task.resume()
+        setState(.handshaking, detail: "已请求原始流 /video.h264")
+        log("传输方式：HTTP 原始流 \(url.absoluteString)（不支持触控回传）")
+        scheduleFirstFrameCheck()
+    }
+
+    private func consumeRaw(_ data: Data) {
+        guard !stopped else { return }
+        receivedBytes += data.count
+        if receivedBytes == data.count {
+            log("收到第一批数据：\(data.count) 字节")
+        }
+        rawBytes.append(contentsOf: data)
+        parseRawNALUnits()
+    }
+
+    /// 按起始码切 NALU；末尾不完整的片段留到下一批数据。
+    private func parseRawNALUnits() {
+        while true {
+            guard let first = Self.startCode(in: rawBytes, from: 0) else {
+                if rawBytes.count > 4 { rawBytes.removeFirst(rawBytes.count - 4) }
+                return
+            }
+            let payloadStart = first.offset + first.length
+            guard payloadStart <= rawBytes.count,
+                  let next = Self.startCode(in: rawBytes, from: payloadStart) else {
+                if first.offset > 0 { rawBytes.removeFirst(first.offset) }
+                return
+            }
+            let nal = Array(rawBytes[payloadStart..<next.offset])
+            rawBytes.removeFirst(next.offset)
+            if !nal.isEmpty { handleNAL(nal) }
+        }
+    }
+
+    private static func startCode(in bytes: [UInt8], from index: Int) -> (offset: Int, length: Int)? {
+        guard bytes.count >= index + 3 else { return nil }
+        var i = index
+        while i + 2 < bytes.count {
+            if bytes[i] == 0, bytes[i + 1] == 0 {
+                if bytes[i + 2] == 1 { return (i, 3) }
+                if i + 3 < bytes.count, bytes[i + 2] == 0, bytes[i + 3] == 1 { return (i, 4) }
+            }
+            i += 1
+        }
+        return nil
+    }
+
+    private func handleNAL(_ nal: [UInt8]) {
+        guard let header = nal.first else { return }
+        switch header & 0x1F {
+        case 7:
+            rawSPS = Data(nal)
+            log("原始流 SPS：\(nal.count) 字节")
+            emitRawFormatIfNeeded()
+        case 8:
+            rawPPS = Data(nal)
+            log("原始流 PPS：\(nal.count) 字节")
+            emitRawFormatIfNeeded()
+        case 1, 5:
+            guard rawFormatSent else { return }
+            var packet = Data()
+            var length = UInt32(nal.count).bigEndian
+            withUnsafeBytes(of: &length) { packet.append(contentsOf: $0) }
+            packet.append(contentsOf: nal)
+            receivedFrames += 1
+            let keyframe = (header & 0x1F) == 5
+            if receivedFrames == 1 {
+                setState(.streaming, detail: "开始接收画面")
+                log("原始流首帧已到达（\(keyframe ? "关键帧" : "差帧")）")
+            }
+            statsIfNeeded()
+            let timestamp = UInt64(receivedFrames) * 16_667
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.delegate?.streamClient(self, didReceiveVideo: packet, keyframe: keyframe, timestampUs: timestamp)
+            }
+        default:
+            break
+        }
+    }
+
+    private func emitRawFormatIfNeeded() {
+        guard !rawFormatSent, let sps = rawSPS, let pps = rawPPS, sps.count > 3 else { return }
+        var avcC = Data([1, sps[1], sps[2], sps[3], 0xFF, 0xE1])
+        avcC.append(contentsOf: [UInt8(sps.count >> 8 & 0xFF), UInt8(sps.count & 0xFF)])
+        avcC.append(sps)
+        avcC.append(1)
+        avcC.append(contentsOf: [UInt8(pps.count >> 8 & 0xFF), UInt8(pps.count & 0xFF)])
+        avcC.append(pps)
+        rawFormatSent = true
+        let info = VideoFormatInfo(width: 0, height: 0, codec: "avc1", avcC: avcC)
+        lastFormat = info
+        log("原始流参数集就绪：合成 avcC \(avcC.count) 字节")
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.delegate?.streamClient(self, didReceive: info)
+        }
+    }
 
     static func makeURL(host: String, port: Int) -> URL? {
         var h = host.trimmingCharacters(in: .whitespacesAndNewlines)
