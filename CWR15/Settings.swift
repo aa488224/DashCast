@@ -26,6 +26,31 @@ enum Settings {
         set { store.set(newValue, forKey: "autoConnect") }
     }
 
+    /// 传输方式：WebSocket 能回传触控；HTTP 原始流只需一次 GET，绕开 WebSocket 升级。
+    enum Transport: Int {
+        case webSocket = 0
+        case raw = 1
+
+        var title: String {
+            switch self {
+            case .webSocket: return "WebSocket（可触控）"
+            case .raw: return "HTTP 原始流（仅画面）"
+            }
+        }
+
+        var detail: String {
+            switch self {
+            case .webSocket: return "ws://…/stream，支持触控回传"
+            case .raw: return "GET /video.h264，纯 Annex-B，不能回传触控"
+            }
+        }
+    }
+
+    static var transport: Transport {
+        get { Transport(rawValue: store.integer(forKey: "transport")) ?? .raw }
+        set { store.set(newValue.rawValue, forKey: "transport") }
+    }
+
     static var autoFullscreen: Bool {
         get { store.object(forKey: "autoFullscreen") as? Bool ?? true }
         set { store.set(newValue, forKey: "autoFullscreen") }
