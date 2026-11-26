@@ -65,6 +65,10 @@ final class SettingsViewController: UIViewController, UITableViewDataSource, UIT
                     Log.shared.info("[设置] 自动连接：\(value ? "开" : "关")")
                 }),
                 Row(title: "主手机地址", detail: Settings.host.isEmpty ? "未设置" : "\(Settings.host):\(Settings.port)"),
+                Row(title: "让主端按此尺寸出图", detail: nil, switchValue: Settings.reportsDisplaySize, onToggle: { value in
+                    Settings.reportsDisplaySize = value
+                    Log.shared.info("[设置] 上报出图尺寸：\(value ? "开" : "关")，重新连接生效")
+                }),
                 Row(title: "出图尺寸", detail: "\(size.width) × \(size.height)", accessory: .disclosureIndicator, action: { [weak self] in
                     self?.chooseResolution()
                 })
@@ -107,7 +111,7 @@ final class SettingsViewController: UIViewController, UITableViewDataSource, UIT
     @objc private func close() { dismiss(animated: true) }
 
     private func chooseResolution() {
-        let sheet = UIAlertController(title: "出图尺寸", message: "上报给主手机的画面规格，改动后重新连接生效", preferredStyle: .actionSheet)
+        let sheet = UIAlertController(title: "出图尺寸", message: "只在打开「让主端按此尺寸出图」后生效。改动会让主手机按新尺寸重启 CarPlay 会话，接收端会短暂断流。", preferredStyle: .actionSheet)
         for (index, option) in Settings.resolutionOptions.enumerated() {
             let title = index == Settings.resolutionIndex ? "✓ \(option.0)" : option.0
             sheet.addAction(UIAlertAction(title: title, style: .default) { [weak self] _ in
