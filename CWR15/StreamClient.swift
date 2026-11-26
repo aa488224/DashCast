@@ -84,7 +84,7 @@ final class StreamClient {
         self.task = task
         task.resume()
 
-        setState(.handshaking, detail: "TCP 已建立，发送握手")
+        setState(.handshaking, detail: "已发起连接，等待 WebSocket 升级")
         sendHandshake()
         receiveLoop()
         startHeartbeat()
@@ -168,6 +168,10 @@ final class StreamClient {
             lastFormat = info
             let name = object["name"] as? String ?? info.codec
             log("视频格式：\(name) \(info.width)×\(info.height)，avcC \(avcC?.count ?? 0) 字节")
+            let lower = info.codec.lowercased()
+            if lower.hasPrefix("hvc1") || lower.hasPrefix("hev1") || lower.contains("265") || lower.contains("hevc") {
+                log("主端在用 H.265 出图，A9 没有 HEVC 硬解，必须把主手机的视频编码改成 H.264")
+            }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.delegate?.streamClient(self, didReceive: info)
@@ -188,6 +192,9 @@ final class StreamClient {
         receivedBytes += data.count
 
         let kind = data[data.startIndex]
+        if receivedBytes == data.count {
+            log("收到第一个二进制包：类型 \(kind)，\(data.count) 字节")
+        }
         switch kind {
         case 0, 1, 4, 5:
             guard data.count >= 9 else { return }
@@ -236,6 +243,11 @@ final class StreamClient {
             "viewer": UUID().uuidString,
             "audioClock": false
         ])
+        guard Settings.reportsDisplaySize else {
+            log("已发送握手：webcodecs；不上报尺寸，沿用主端当前出图")
+            scheduleFirstFrameCheck()
+            return
+        }
         let size = Settings.reportSize
         sendJSON([
             "type": "display",
@@ -249,6 +261,23 @@ final class StreamClient {
             "fullscreen": true
         ])
         log("已发送握手：webcodecs，上报 \(size.width)×\(size.height)")
+        scheduleFirstFrameCheck()
+    }
+
+    /// 主端只有在关键帧到来时才会下发 format 与视频帧。
+    /// 迟迟没有首帧就主动催一次，避免一直卡在「等待关键帧」。
+    private func scheduleFirstFrameCheck() {
+        for (delay, round) in [(4.0, 1), (9.0, 2)] {
+            queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, !self.stopped, self.receivedFrames == 0 else { return }
+                if self.receivedBytes == 0 {
+                    self.log("已连接 \(Int(delay)) 秒没有收到任何数据：主手机可能没在推流，或端口不对")
+                } else {
+                    self.log("已连接 \(Int(delay)) 秒仍无画面，第 \(round) 次请求关键帧")
+                }
+                self.sendJSON(["type": "keyframe", "reason": "接收端等待首帧"])
+            }
+        }
     }
 
     private func sendJSON(_ object: [String: Any]) {
