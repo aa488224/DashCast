@@ -54,6 +54,15 @@ enum Settings {
         return (option.1, option.2)
     }
 
+    /// 是否让主手机按上面的尺寸重新出图。
+    /// 默认关：主端收到 display 会让 CarPlay 会话按新尺寸重启，
+    /// 重启会重置编码器、丢弃已连接的接收端，表现为「握手成功但一直没有画面」。
+    /// 只做第二屏时沿用主端当前出图尺寸、在本地缩放更稳。
+    static var reportsDisplaySize: Bool {
+        get { store.object(forKey: "reportsDisplaySize") as? Bool ?? false }
+        set { store.set(newValue, forKey: "reportsDisplaySize") }
+    }
+
     /// 拉伸铺满（默认关，保持比例，避免 CarPlay 变形）。
     static var fillScreen: Bool {
         get { store.object(forKey: "fillScreen") as? Bool ?? false }
