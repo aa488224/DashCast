@@ -110,7 +110,17 @@ final class RootViewController: UIViewController, StreamClientDelegate {
         title.font = .systemFont(ofSize: 21, weight: .bold)
         title.numberOfLines = 0
 
-        let header = UIStackView(arrangedSubviews: [icon, title])
+        let subtitle = UILabel()
+        subtitle.text = "iOS 15 专用 · 主手机需运行 CarWithin 并开启局域网接收页"
+        subtitle.font = .systemFont(ofSize: 12)
+        subtitle.textColor = .secondaryLabel
+        subtitle.numberOfLines = 0
+
+        let titles = UIStackView(arrangedSubviews: [title, subtitle])
+        titles.axis = .vertical
+        titles.spacing = 3
+
+        let header = UIStackView(arrangedSubviews: [icon, titles])
         header.axis = .horizontal
         header.spacing = 12
         header.alignment = .center
