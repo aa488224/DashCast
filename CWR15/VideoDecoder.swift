@@ -39,14 +39,19 @@ final class VideoDecoder {
                 guard let sps = spsRaw.bindMemory(to: UInt8.self).baseAddress,
                       let pps = ppsRaw.bindMemory(to: UInt8.self).baseAddress else { return }
                 var pointers: [UnsafePointer<UInt8>] = [sps, pps]
-                pointers.withUnsafeBufferPointer { buffer in
-                    guard let base = buffer.baseAddress else { return }
-                    status = CMVideoFormatDescriptionCreateFromH264ParameterSets(
-                        allocator: kCFAllocatorDefault,
-                        parameterSetCount: 2,
-                        parameterSets: base,
-                        nalUnitHeaderLength: 4,
-                        formatDescriptionOut: &description)
+                var sizes: [Int] = [sets.sps.count, sets.pps.count]
+                pointers.withUnsafeBufferPointer { pointerBuffer in
+                    sizes.withUnsafeBufferPointer { sizeBuffer in
+                        guard let pointerBase = pointerBuffer.baseAddress,
+                              let sizeBase = sizeBuffer.baseAddress else { return }
+                        status = CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                            allocator: kCFAllocatorDefault,
+                            parameterSetCount: 2,
+                            parameterSetPointers: pointerBase,
+                            parameterSetSizes: sizeBase,
+                            nalUnitHeaderLength: 4,
+                            formatDescriptionOut: &description)
+                    }
                 }
             }
         }
