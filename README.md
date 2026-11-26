@@ -6,6 +6,33 @@
 
 > 只负责“接收 + 解码 + 显示 + 回传触控”，不创建 CarPlay 会话，不修改任何系统设置。
 
+## 依赖说明（重要）
+
+这个 App **不能单独工作**。CarPlay 画面是 iPhone 的 iOS 渲染并编码出来的，只有“被 iOS 认作车机”的那一端才拿得到这路流。iOS 不允许 App 自己开 Wi-Fi 热点当 AP，所以手机端必须有一个 App 顶替车机角色。
+
+目前的链路：
+
+```
+iPhone（运行 CarWithin，接住 CarPlay 并编码）
+   ↓  ws://<主手机 IP>:9888/stream   局域网
+DashCast（本 App：硬解 + 显示 + 触控回传）
+```
+
+- 主手机需要运行 [CarWithin](https://github.com/xmz28/CarWithin)（或实现同一输出协议的程序），并把「当前输出」设为「浏览器」、打开「局域网接收页」
+- 本 App 面向 **iOS 15**：iOS 15 的 Safari / WebView 没有 WebCodecs、也没有 MSE，浏览器端必然黑屏；这里用 `AVSampleBufferDisplayLayer`（VideoToolbox）硬解，绕开浏览器能力限制
+- **WebSocket 只是传输管道，和 WebCodecs 无关**。握手里的 `"decoder":"webcodecs"` 是一个开关，含义是“请发裸 H.264（AVCC），不要发 fMP4 分片”，因为原生解码器要的就是裸 NALU
+
+## 同类开源项目
+
+| 项目 | 端 | 手机端要装 App | 说明 |
+| --- | --- | --- | --- |
+| [CarWithin](https://github.com/xmz28/CarWithin) | iOS 16+ | 要 | 本项目的上游，一体 + 浏览器输出 |
+| [PlayPort](https://github.com/fulin-peng-ydxs/playport) | macOS | **不要** | 协议栈跑在电脑上，蓝牙 + Wi-Fi 让 iPhone 主动连，浏览器当车机 |
+| [DiPlay / xcertplay](https://github.com/shihabal3amr/diplay) | Android 车机 | 不要 | 车机端 App 当接收器，需要车机可装 APK |
+| Showcase | 越狱 iOS | 不要 | 越狱设备当无线 CarPlay 接收端（BTstack + HCI） |
+
+结论：**不越狱、纯 iOS App、且手机端零依赖** 的现成方案目前没有；能做到零依赖的都要一块能跑协议栈的硬件或越狱环境。
+
 ## 它能做什么
 
 - 连接运行 CarWithin（或兼容输出端）的主手机，实时显示 CarPlay 画面
