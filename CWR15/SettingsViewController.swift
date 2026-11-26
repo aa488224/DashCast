@@ -8,10 +8,24 @@ final class SettingsViewController: UIViewController, UITableViewDataSource, UIT
     private struct Row {
         let title: String
         var detail: String?
-        var accessory: UITableViewCell.AccessoryType = .none
+        var accessory: UITableViewCell.AccessoryType
         var action: (() -> Void)?
         var switchValue: Bool?
         var onToggle: ((Bool) -> Void)?
+
+        init(title: String,
+             detail: String? = nil,
+             accessory: UITableViewCell.AccessoryType = .none,
+             action: (() -> Void)? = nil,
+             switchValue: Bool? = nil,
+             onToggle: ((Bool) -> Void)? = nil) {
+            self.title = title
+            self.detail = detail
+            self.accessory = accessory
+            self.action = action
+            self.switchValue = switchValue
+            self.onToggle = onToggle
+        }
     }
 
     private var sections: [(String, [Row])] = []
