@@ -35,6 +35,8 @@
 	<array>
 		<string>_http._tcp</string>
 		<string>_tds-carkit._tcp</string>
+		<string>_airplay._tcp</string>
+		<string>_raop._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>需要访问局域网，才能连接运行传送端的主手机并接收 CarPlay 画面。</string>
