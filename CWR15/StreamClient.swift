@@ -52,10 +52,10 @@ final class StreamClient {
     private var lastFormat: VideoFormatInfo?
     private var keyframeRequests = 0
 
-    // HTTP 原始流（Annex-B）
-    private var rawSession: URLSession?
-    private var rawTask: URLSessionDataTask?
-    private var rawDelegate: RawDelegate?
+    // HTTP 原始流（BSD socket 直连，不经 URLSession / NWConnection）
+    private let rawQueue = DispatchQueue(label: "cwr15.raw")
+    private var rawFD: Int32 = -1
+    private var rawStop = false
     private var rawBytes: [UInt8] = []
     private var rawSPS: Data?
     private var rawPPS: Data?
@@ -65,7 +65,8 @@ final class StreamClient {
     // MARK: 生命周期
 
     func start(host: String, port: Int) {
-        stop(notify: false)
+        // 同步清理，避免上一次 stop 的异步块把新连接关掉
+        cancelAll()
         guard let url = Self.makeURL(host: host, port: port) else {
             setState(.failed("地址无效"), detail: "无法解析地址：\(host)")
             return
@@ -109,21 +110,7 @@ final class StreamClient {
         queue.async { [weak self] in
             guard let self else { return }
             self.stopped = true
-            self.heartbeat?.cancel()
-            self.heartbeat = nil
-            self.task?.cancel(with: .goingAway, reason: nil)
-            self.task = nil
-            self.session?.invalidateAndCancel()
-            self.session = nil
-            self.rawTask?.cancel()
-            self.rawTask = nil
-            self.rawSession?.invalidateAndCancel()
-            self.rawSession = nil
-            self.rawDelegate = nil
-            self.rawBytes.removeAll()
-            self.rawSPS = nil
-            self.rawPPS = nil
-            self.rawFormatSent = false
+            self.cancelAll()
             self.lastFormat = nil
             if notify {
                 self.setState(.idle, detail: "已断开")
@@ -131,6 +118,21 @@ final class StreamClient {
                 self.state = .idle
             }
         }
+    }
+
+    /// 只做资源释放，任何线程调用都安全（不再派发到队列）。
+    private func cancelAll() {
+        heartbeat?.cancel()
+        heartbeat = nil
+        task?.cancel(with: .goingAway, reason: nil)
+        task = nil
+        session?.invalidateAndCancel()
+        session = nil
+        closeRawSocket()
+        rawBytes.removeAll()
+        rawSPS = nil
+        rawPPS = nil
+        rawFormatSent = false
     }
 
     func requestKeyframe() {
@@ -366,9 +368,7 @@ final class StreamClient {
         heartbeat?.cancel(); heartbeat = nil
         task?.cancel(with: .goingAway, reason: nil); task = nil
         session?.invalidateAndCancel(); session = nil
-        rawTask?.cancel(); rawTask = nil
-        rawSession?.invalidateAndCancel(); rawSession = nil
-        rawDelegate = nil
+        closeRawSocket()
         setState(.failed(reason), detail: reason)
     }
 
@@ -389,50 +389,156 @@ final class StreamClient {
 
     // MARK: HTTP 原始流（Annex-B）
 
-    private final class RawDelegate: NSObject, URLSessionDataDelegate {
-        var onData: ((Data) -> Void)?
-        var onEnd: ((String) -> Void)?
-
-        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-            onData?(data)
-        }
-
-        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-            if let error { onEnd?("原始流中断：\(error.localizedDescription)") }
-            else { onEnd?("主手机结束了原始流") }
-        }
-    }
-
     private func startRaw(host: String, port: Int) {
         rawBytes.removeAll()
         rawSPS = nil
         rawPPS = nil
         rawFormatSent = false
-        guard let url = URL(string: "http://\(host):\(port)/video.h264") else {
-            fail("地址无效"); return
+        rawStop = false
+        setState(.handshaking, detail: "正在直连 \(host):\(port)")
+        log("传输方式：HTTP 原始流 tcp://\(host):\(port)/video.h264（单向下行）")
+        rawQueue.async { [weak self] in
+            self?.runRaw(host: host, port: port)
         }
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 15
-        config.timeoutIntervalForResource = 60 * 60 * 12
-        config.httpAdditionalHeaders = ["User-Agent": "DashCast/1.0"]
-        let delegate = RawDelegate()
-        delegate.onData = { [weak self] data in self?.queue.async { self?.consumeRaw(data) } }
-        delegate.onEnd = { [weak self] reason in
-            self?.queue.async {
-                guard let self, !self.stopped else { return }
-                self.fail(reason)
-            }
-        }
-        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
-        let task = session.dataTask(with: url)
-        rawDelegate = delegate
-        rawSession = session
-        rawTask = task
-        task.resume()
-        setState(.handshaking, detail: "已请求原始流 /video.h264")
-        log("传输方式：HTTP 原始流 \(url.absoluteString)（不支持触控回传）")
         scheduleFirstFrameCheck()
     }
+
+    private func closeRawSocket() {
+        rawStop = true
+        let fd = rawFD
+        rawFD = -1
+        if fd >= 0 { shutdown(fd, SHUT_RDWR); close(fd) }
+    }
+
+    /// 纯 BSD socket：不用 URLSession、不用 NWConnection，任何一步失败都写清 errno。
+    private func runRaw(host: String, port: Int) {
+        var hints = addrinfo(ai_flags: 0, ai_family: AF_INET, ai_socktype: SOCK_STREAM,
+                             ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil, ai_addr: nil, ai_next: nil)
+        var result: UnsafeMutablePointer<addrinfo>?
+        let resolved = getaddrinfo(host, String(port), &hints, &result)
+        guard resolved == 0, let info = result else {
+            finishRaw("地址解析失败：\(String(cString: gai_strerror(resolved)))")
+            return
+        }
+        defer { freeaddrinfo(result) }
+        guard let address = info.pointee.ai_addr else {
+            finishRaw("地址为空")
+            return
+        }
+
+        let fd = socket(info.pointee.ai_family, info.pointee.ai_socktype, info.pointee.ai_protocol)
+        guard fd >= 0 else {
+            finishRaw("创建 socket 失败，errno \(errno)")
+            return
+        }
+        rawFD = fd
+        var on: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+
+        // 非阻塞 connect + poll 8 秒，避免卡在系统默认的 75 秒超时
+        let flags = fcntl(fd, F_GETFL, 0)
+        _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        var connected = connect(fd, address, info.pointee.ai_addrlen) == 0
+        if !connected {
+            if errno == EINPROGRESS {
+                var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+                let ready = poll(&pfd, 1, 8000)
+                if ready > 0 {
+                    var soError: Int32 = 0
+                    var length = socklen_t(MemoryLayout<Int32>.size)
+                    getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &length)
+                    connected = soError == 0
+                    if !connected { finishRaw("TCP 连接被拒绝，errno \(soError)") }
+                } else if ready == 0 {
+                    finishRaw("TCP 连接超时：8 秒内没有任何回应，检查 IP、端口或路由器隔离")
+                } else {
+                    finishRaw("TCP 连接失败，errno \(errno)")
+                }
+            } else {
+                finishRaw("TCP 连接失败，errno \(errno)")
+            }
+        }
+        guard connected else { return }
+        _ = fcntl(fd, F_SETFL, flags)
+
+        // 接收超时 6 秒，空转时可以打日志，而不是无限卡住
+        var timeout = timeval(tv_sec: 6, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        log("TCP 已连接 \(host):\(port)，发送 GET /video.h264")
+
+        let request = "GET /video.h264 HTTP/1.1\r\nHost: \(host):\(port)\r\nUser-Agent: DashCast/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+        let sent = request.withCString { pointer -> Int in
+            var offset = 0
+            let total = strlen(pointer)
+            while offset < total {
+                let written = send(fd, pointer + offset, total - offset, 0)
+                if written <= 0 { return offset }
+                offset += written
+            }
+            return offset
+        }
+        guard sent > 0 else {
+            finishRaw("请求发送失败，errno \(errno)")
+            return
+        }
+
+        var buffer = [UInt8](repeating: 0, count: 65_536)
+        var headerDone = false
+        var headerBuffer = Data()
+        var idleRounds = 0
+        var gotBytes = 0
+
+        while !rawStop {
+            let read = recv(fd, &buffer, buffer.count, 0)
+            if read > 0 {
+                idleRounds = 0
+                gotBytes += read
+                var payload = Data(buffer[0..<read])
+                if !headerDone {
+                    headerBuffer.append(payload)
+                    guard let range = headerBuffer.range(of: Data("\r\n\r\n".utf8)) else {
+                        if headerBuffer.count > 8192 {
+                            finishRaw("主端回了无法识别的数据")
+                            return
+                        }
+                        continue
+                    }
+                    headerDone = true
+                    let head = String(decoding: headerBuffer[headerBuffer.startIndex..<range.lowerBound], as: UTF8.self)
+                    let statusLine = head.split(separator: "\r\n").first.map(String.init) ?? head
+                    log("主端响应：\(statusLine)")
+                    payload = headerBuffer.subdata(in: range.upperBound..<headerBuffer.endIndex)
+                }
+                if !payload.isEmpty {
+                    let chunk = payload
+                    queue.async { [weak self] in self?.consumeRaw(chunk) }
+                }
+            } else if read == 0 {
+                finishRaw("主手机关闭了连接（共收到 \(gotBytes) 字节）")
+                return
+            } else {
+                if errno == EAGAIN || errno == EWOULDBLOCK {
+                    idleRounds += 1
+                    if idleRounds == 1 {
+                        log("TCP 通了但 6 秒内没有收到任何数据：主手机 App 可能已进入后台被 iOS 挂起，或端口上的服务没在推流")
+                    }
+                    if idleRounds >= 30 { finishRaw("长时间没有数据，主动断开"); return }
+                    continue
+                }
+                finishRaw("接收失败，errno \(errno)")
+                return
+            }
+        }
+    }
+
+    private func finishRaw(_ reason: String) {
+        closeRawSocket()
+        queue.async { [weak self] in
+            guard let self, !self.stopped else { return }
+            self.fail(reason)
+        }
+    }
+
 
     private func consumeRaw(_ data: Data) {
         guard !stopped else { return }
@@ -545,5 +651,114 @@ final class StreamClient {
         }
         guard !h.isEmpty else { return nil }
         return URL(string: "ws://\(h):\(finalPort)/stream")
+    }
+
+    // MARK: 网络自检（不走浏览器，直接在 App 内探测主手机）
+
+    /// 依次做三件事并写成日志：域名解析 → TCP 连接 → 发一个 HTTP GET 看有没有响应。
+    /// 这三步能一次性区分「网络不通」「端口不通」「主端 App 没在跑」。
+    static func selfTest(host: String, port: Int, completion: @escaping (String) -> Void) {
+        var target = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        for prefix in ["ws://", "wss://", "http://", "https://"] where target.lowercased().hasPrefix(prefix) {
+            target = String(target.dropFirst(prefix.count))
+        }
+        if let slash = target.firstIndex(of: "/") { target = String(target[..<slash]) }
+        guard !target.isEmpty else {
+            let text = "自检失败：没有填写主手机地址"
+            Log.shared.warn("[自检] \(text)")
+            DispatchQueue.main.async { completion(text) }
+            return
+        }
+        Log.shared.info("[自检] 目标 \(target):\(port)")
+
+        DispatchQueue.global().async {
+            var lines: [String] = []
+            var hints = addrinfo(ai_flags: 0, ai_family: AF_INET, ai_socktype: SOCK_STREAM,
+                                 ai_protocol: 0, ai_addrlen: 0, ai_canonname: nil, ai_addr: nil, ai_next: nil)
+            var result: UnsafeMutablePointer<addrinfo>?
+            let resolved = getaddrinfo(target, String(port), &hints, &result)
+            guard resolved == 0, let info = result, let address = info.pointee.ai_addr else {
+                let message = "地址解析失败：\(String(cString: gai_strerror(resolved)))"
+                Log.shared.warn("[自检] \(message)")
+                DispatchQueue.main.async { completion(message) }
+                return
+            }
+            defer { freeaddrinfo(result) }
+            lines.append("① 地址解析成功")
+
+            let fd = socket(info.pointee.ai_family, info.pointee.ai_socktype, info.pointee.ai_protocol)
+            guard fd >= 0 else {
+                let message = "创建 socket 失败，errno \(errno)"
+                Log.shared.warn("[自检] \(message)")
+                DispatchQueue.main.async { completion(message) }
+                return
+            }
+            defer { close(fd) }
+            var on: Int32 = 1
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+            let flags = fcntl(fd, F_GETFL, 0)
+            _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+            var connected = connect(fd, address, info.pointee.ai_addrlen) == 0
+            if !connected, errno == EINPROGRESS {
+                var pfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+                let ready = poll(&pfd, 1, 5000)
+                if ready > 0 {
+                    var soError: Int32 = 0
+                    var length = socklen_t(MemoryLayout<Int32>.size)
+                    getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &length)
+                    connected = soError == 0
+                    if !connected { lines.append("② TCP 被拒绝，errno \(soError)") }
+                } else {
+                    lines.append(ready == 0 ? "② TCP 连接超时（5 秒），IP 或端口不对，或被路由器隔离" : "② TCP 连接失败，errno \(errno)")
+                }
+            }
+            if connected { lines.append("② TCP 连接成功") }
+            guard connected else {
+                let text = lines.joined(separator: "\n")
+                Log.shared.warn("[自检] \(text.replacingOccurrences(of: "\n", with: " | "))")
+                DispatchQueue.main.async { completion(text) }
+                return
+            }
+            _ = fcntl(fd, F_SETFL, flags)
+            var timeout = timeval(tv_sec: 5, tv_usec: 0)
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+            let request = "GET / HTTP/1.1\r\nHost: \(target):\(port)\r\nUser-Agent: DashCast/1.0\r\nConnection: close\r\n\r\n"
+            let sent = request.withCString { pointer -> Int in
+                var offset = 0
+                let total = strlen(pointer)
+                while offset < total {
+                    let written = send(fd, pointer + offset, total - offset, 0)
+                    if written <= 0 { return offset }
+                    offset += written
+                }
+                return offset
+            }
+            guard sent > 0 else {
+                lines.append("③ 请求发送失败，errno \(errno)")
+                let text = lines.joined(separator: "\n")
+                Log.shared.warn("[自检] \(text.replacingOccurrences(of: "\n", with: " | "))")
+                DispatchQueue.main.async { completion(text) }
+                return
+            }
+
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            let read = recv(fd, &buffer, buffer.count, 0)
+            if read > 0 {
+                let head = String(decoding: buffer[0..<read], as: UTF8.self)
+                let statusLine = head.split(separator: "\r\n").first.map(String.init) ?? head
+                lines.append("③ 收到 \(read) 字节：\(statusLine)")
+                lines.append("结论：网络到主手机是通的，主端 HTTP 服务正常")
+            } else if read == 0 {
+                lines.append("③ 连接被对端关闭，没有返回任何数据")
+            } else if errno == EAGAIN || errno == EWOULDBLOCK {
+                lines.append("③ TCP 通了但 5 秒没有响应：主手机 App 没在接收连接（多半被系统挂起，请让它保持前台）")
+            } else {
+                lines.append("③ 接收失败，errno \(errno)")
+            }
+            let text = lines.joined(separator: "\n")
+            Log.shared.info("[自检] \(text.replacingOccurrences(of: "\n", with: " | "))")
+            DispatchQueue.main.async { completion(text) }
+        }
     }
 }
