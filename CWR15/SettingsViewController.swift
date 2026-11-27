@@ -86,6 +86,9 @@ final class SettingsViewController: UIViewController, UITableViewDataSource, UIT
                 })
             ]),
             ("诊断", [
+                Row(title: "网络自检", detail: "探测主手机是否可达", accessory: .disclosureIndicator, action: { [weak self] in
+                    self?.runSelfTest()
+                }),
                 Row(title: "运行日志", detail: "\(Log.shared.snapshot().count) 条", accessory: .disclosureIndicator, action: { [weak self] in
                     self?.openLog()
                 }),
@@ -151,6 +154,21 @@ final class SettingsViewController: UIViewController, UITableViewDataSource, UIT
 
     private func openLog() {
         navigationController?.pushViewController(LogViewController(), animated: true)
+    }
+
+    private func runSelfTest() {
+        guard !Settings.host.isEmpty else {
+            let alert = UIAlertController(title: "网络自检", message: "先在首页填写主手机地址", preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "好", style: .default))
+            present(alert, animated: true)
+            return
+        }
+        let alert = UIAlertController(title: "网络自检", message: "正在连接 \(Settings.host):\(Settings.port)…", preferredStyle: .alert)
+        present(alert, animated: true)
+        StreamClient.selfTest(host: Settings.host, port: Settings.port) { [weak alert] text in
+            alert?.message = text
+            alert?.addAction(UIAlertAction(title: "好", style: .default))
+        }
     }
 
     private func copyDiagnostics() {
