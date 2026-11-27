@@ -90,9 +90,66 @@ final class RootViewController: UIViewController, StreamClientDelegate {
             content.widthAnchor.constraint(equalTo: scrollView.widthAnchor, constant: -32)
         ])
 
+        content.addArrangedSubview(makeAirPlayCard())
         content.addArrangedSubview(makeHeroCard())
         content.addArrangedSubview(makeAddressCard())
         content.addArrangedSubview(makeGuideCard())
+    }
+
+    private func makeAirPlayCard() -> UIView {
+        let card = makeCard()
+
+        let icon = UIImageView(image: UIImage(systemName: "airplayvideo"))
+        icon.tintColor = .systemTeal
+        icon.contentMode = .scaleAspectFit
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.widthAnchor.constraint(equalToConstant: 34).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 34).isActive = true
+
+        let title = UILabel()
+        title.text = "AirPlay 接收屏"
+        title.font = .systemFont(ofSize: 19, weight: .bold)
+        title.numberOfLines = 0
+
+        let subtitle = UILabel()
+        subtitle.text = "主手机不用装任何 App：控制中心 › 屏幕镜像 › 选择「\(Settings.airPlayName)」"
+        subtitle.font = .systemFont(ofSize: 12)
+        subtitle.textColor = .secondaryLabel
+        subtitle.numberOfLines = 0
+
+        let titles = UIStackView(arrangedSubviews: [title, subtitle])
+        titles.axis = .vertical
+        titles.spacing = 3
+
+        let header = UIStackView(arrangedSubviews: [icon, titles])
+        header.axis = .horizontal
+        header.spacing = 12
+        header.alignment = .center
+
+        let note = UILabel()
+        note.text = "投过来的是手机屏幕镜像（可横屏全屏），不是 CarPlay 车机界面。"
+        note.font = .systemFont(ofSize: 12)
+        note.textColor = .tertiaryLabel
+        note.numberOfLines = 0
+
+        let button = UIButton(type: .system)
+        button.setTitle("启动 AirPlay 接收", for: .normal)
+        button.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
+        button.backgroundColor = .systemTeal
+        button.setTitleColor(.white, for: .normal)
+        button.layer.cornerRadius = 14
+        button.heightAnchor.constraint(equalToConstant: 52).isActive = true
+        button.addAction(UIAction { [weak self] _ in
+            let controller = AirPlayViewController()
+            controller.modalPresentationStyle = .fullScreen
+            self?.present(controller, animated: true)
+        }, for: .touchUpInside)
+
+        let stack = UIStackView(arrangedSubviews: [header, note, button])
+        stack.axis = .vertical
+        stack.spacing = 12
+        card.addArrangedSubview(stack)
+        return card
     }
 
     private func makeHeroCard() -> UIView {
