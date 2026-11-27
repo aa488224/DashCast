@@ -99,6 +99,17 @@ enum Settings {
         set { store.set(newValue, forKey: "showTouchIndicator") }
     }
 
+    // MARK: AirPlay 接收
+
+    /// 在 iPhone「屏幕镜像」里显示的名称。
+    static var airPlayName: String {
+        get {
+            let value = store.string(forKey: "airPlayName")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return value.isEmpty ? "DashCast" : value
+        }
+        set { store.set(newValue, forKey: "airPlayName") }
+    }
+
     // MARK: 声音
 
     static var playAudio: Bool {
