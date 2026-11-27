@@ -471,7 +471,7 @@ final class StreamClient {
             var offset = 0
             let total = strlen(pointer)
             while offset < total {
-                let written = send(fd, pointer + offset, total - offset, 0)
+                let written = Darwin.send(fd, pointer + offset, total - offset, 0)
                 if written <= 0 { return offset }
                 offset += written
             }
@@ -728,7 +728,7 @@ final class StreamClient {
                 var offset = 0
                 let total = strlen(pointer)
                 while offset < total {
-                    let written = send(fd, pointer + offset, total - offset, 0)
+                    let written = Darwin.send(fd, pointer + offset, total - offset, 0)
                     if written <= 0 { return offset }
                     offset += written
                 }
